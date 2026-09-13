@@ -15,6 +15,9 @@ import SwiftUI
 struct AdShell<Content: View>: View {
     @Environment(\.palette) private var c
     var spacing: CGFloat = 0
+    /// Pull to refresh. Must be attached to the ScrollView itself, so it lives here
+    /// rather than on whatever the caller wraps AdShell in.
+    var onRefresh: (@Sendable () async -> Void)? = nil
     @ViewBuilder var content: Content
 
     var body: some View {
@@ -29,6 +32,7 @@ struct AdShell<Content: View>: View {
         .scrollDismissesKeyboard(.interactively)
         .background(c.bg.ignoresSafeArea())
         .foregroundStyle(c.fg)
+        .refreshable { await onRefresh?() }
     }
 }
 
@@ -85,18 +89,27 @@ struct AdTopBarAction: View {
     @Environment(\.palette) private var c
     let label: String
     var enabled: Bool = true
+    var loading: Bool = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            Text(label)
-                .font(AdFont.sans(14, weight: .bold))
-                .foregroundStyle(enabled ? c.accent : c.fgMuted)
-                .opacity(enabled ? 1 : 0.5)
-                .padding(.horizontal, 4)
+            Group {
+                if loading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(c.accent)
+                } else {
+                    Text(label)
+                        .font(AdFont.sans(14, weight: .bold))
+                        .foregroundStyle(enabled ? c.accent : c.fgMuted)
+                        .opacity(enabled ? 1 : 0.5)
+                }
+            }
+            .padding(.horizontal, 4)
         }
         .buttonStyle(.plain)
-        .disabled(!enabled)
+        .disabled(!enabled || loading)
     }
 }
 
@@ -281,6 +294,9 @@ struct AdField: View {
     var hint: String? = nil
     var rows: Int? = nil
     var chars: Int? = nil
+    /// Replaces the hint and reddens the border when the value won't do.
+    var error: String? = nil
+    var disabled: Bool = false
 
     @FocusState private var focused: Bool
 
@@ -309,15 +325,24 @@ struct AdField: View {
                 }
             }
             .font(AdFont.sans(15))
-            .foregroundStyle(c.fg)
+            .foregroundStyle(disabled ? c.fgMuted : c.fg)
             .tint(c.accent)
             .focused($focused)
+            .disabled(disabled)
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .background(c.card, in: .rect(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(focused ? c.accent : c.cardEdge))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12)
+                    .strokeBorder(error != nil ? c.destructive : (focused ? c.accent : c.cardEdge))
+            )
 
-            if let hint {
+            if let error {
+                Text(error)
+                    .font(AdFont.sans(11.5))
+                    .lineSpacing(2)
+                    .foregroundStyle(c.destructive)
+            } else if let hint {
                 Text(hint)
                     .font(AdFont.sans(11.5))
                     .lineSpacing(2)
@@ -340,11 +365,12 @@ struct AdButton: View {
     var full: Bool = false
     var small: Bool = false
     var disabled: Bool = false
+    var loading: Bool = false
     let action: () -> Void
 
     var body: some View {
         let (bg, fg, edge): (Color, Color, Color) = {
-            if disabled { return (c.surfaceRaised, c.fgMuted, c.cardEdge) }
+            if disabled && !loading { return (c.surfaceRaised, c.fgMuted, c.cardEdge) }
             switch variant {
             case .primary: return (c.accent, c.onAccent, .clear)
             case .gold: return (c.glow, c.onGlow, .clear)
@@ -356,7 +382,11 @@ struct AdButton: View {
 
         Button(action: action) {
             HStack(spacing: 8) {
-                if let icon, !disabled {
+                if loading {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(fg)
+                } else if let icon, !disabled {
                     Image(systemName: icon)
                         .font(.system(size: small ? 13 : 15, weight: .semibold))
                 }
@@ -369,10 +399,10 @@ struct AdButton: View {
             .padding(.horizontal, small ? 14 : 20)
             .background(bg, in: .rect(cornerRadius: small ? 10 : 12))
             .overlay(RoundedRectangle(cornerRadius: small ? 10 : 12).strokeBorder(edge))
-            .opacity(disabled ? 0.65 : 1)
+            .opacity(disabled && !loading ? 0.65 : 1)
         }
         .buttonStyle(.plain)
-        .disabled(disabled)
+        .disabled(disabled || loading)
     }
 }
 
@@ -705,12 +735,21 @@ extension View {
 struct AdToast: View {
     @Environment(\.palette) private var c
     let message: String
+    var kind: Toast.Kind = .success
+
+    private var icon: String {
+        kind == .error ? "exclamationmark.triangle.fill" : "checkmark"
+    }
+
+    private var iconColor: Color {
+        kind == .error ? c.destructive : c.glow
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "checkmark")
+            Image(systemName: icon)
                 .font(.system(size: 14, weight: .bold))
-                .foregroundStyle(c.glow)
+                .foregroundStyle(iconColor)
             Text(message)
                 .font(AdFont.sans(13.5, weight: .semibold))
                 .foregroundStyle(c.toastFg)
@@ -718,7 +757,10 @@ struct AdToast: View {
         }
         .padding(EdgeInsets(top: 13, leading: 16, bottom: 13, trailing: 16))
         .background(c.toastBg, in: .rect(cornerRadius: 13))
-        .overlay(RoundedRectangle(cornerRadius: 13).strokeBorder(c.glowSoft))
+        .overlay(
+            RoundedRectangle(cornerRadius: 13)
+                .strokeBorder(kind == .error ? c.dangerEdge : c.glowSoft)
+        )
         .shadow(color: .black.opacity(0.4), radius: 20, y: 12)
         .padding(.horizontal, 20)
     }

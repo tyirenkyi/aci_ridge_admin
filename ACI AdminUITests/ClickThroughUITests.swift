@@ -13,6 +13,10 @@ final class ClickThroughUITests: XCTestCase {
     @MainActor
     func testClickThroughAllScreens() throws {
         let app = XCUIApplication()
+        // Runs against in-memory fixtures with the data already loaded, so the walk
+        // is hermetic and never waits on a spinner.
+        app.launchArguments = ["-ui-testing"]
+        XCUIDevice.shared.orientation = .portrait
         app.launch()
 
         // ── Sign in ──
@@ -85,6 +89,9 @@ final class ClickThroughUITests: XCTestCase {
         let approve = app.buttons["Approve"]
         XCTAssertTrue(approve.waitForExistence(timeout: 5))
         snap(app, "13-review-item")
+        // The review item is a long screen; the actions sit below the fold and
+        // XCUITest never scrolls on its own.
+        scrollTo(app, approve)
         approve.tap()
         XCTAssertTrue(
             app.staticTexts["Approved — published to readers"].waitForExistence(timeout: 5))
@@ -92,6 +99,21 @@ final class ClickThroughUITests: XCTestCase {
     }
 
     // MARK: - Helpers
+
+    /// Swipes until the element is genuinely on screen. `tap()` on an element that
+    /// is in the hierarchy but below the fold silently does nothing — and
+    /// `isHittable` alone reports true for such elements, so check the frame as well.
+    @MainActor
+    private func scrollTo(_ app: XCUIApplication, _ element: XCUIElement, tries: Int = 8) {
+        let window = app.windows.firstMatch.frame
+        for _ in 0..<tries {
+            guard element.exists else { return }
+            let frame = element.frame
+            let onScreen = window.contains(CGPoint(x: frame.midX, y: frame.midY))
+            if onScreen && element.isHittable { return }
+            app.swipeUp()
+        }
+    }
 
     @MainActor
     private func tab(_ app: XCUIApplication, _ id: String) {

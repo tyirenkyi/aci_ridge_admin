@@ -3,16 +3,20 @@
 //  ACI Admin
 //
 //  Sign-in and PIN lock, ported from admin-screens-a.jsx.
-//  Prototype only — the buttons navigate, nothing authenticates.
 //
 
+import AuthenticationServices
 import SwiftUI
 
 // MARK: - Sign in
 
 struct AdSignInView: View {
     @Environment(\.palette) private var c
-    let onNext: () -> Void
+    @Environment(AdminSession.self) private var session
+
+    /// Why the last attempt ended, when it ended badly. The server's 403 sentence is
+    /// already the copy this screen wants.
+    var reason: AdminSession.SignOutReason?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -44,24 +48,13 @@ struct AdSignInView: View {
                 .frame(maxWidth: 300, alignment: .leading)
                 .padding(.top, 16)
 
-            Button(action: onNext) {
-                HStack(spacing: 9) {
-                    Image(systemName: "apple.logo")
-                        .font(.system(size: 17, weight: .medium))
-                    Text("Sign in with Apple")
-                        .font(AdFont.sans(15.5, weight: .semibold))
-                }
-                .foregroundStyle(c.inverseFg)
-                .frame(maxWidth: .infinity, minHeight: 50)
-                .background(c.inverseBg, in: .rect(cornerRadius: 12))
-            }
-            .buttonStyle(.plain)
-            .padding(.top, 34)
+            signInButton
+                .padding(.top, 34)
 
-            Text("Console access is granted by the church office. Your Apple ID must match an approved address.")
+            Text(reason?.message ?? "Console access is granted by the church office. Your Apple ID must match an approved address.")
                 .font(AdFont.sans(11.5))
                 .lineSpacing(2.5)
-                .foregroundStyle(c.fgMuted)
+                .foregroundStyle(reason?.message == nil ? c.fgMuted : c.destructive)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity)
                 .padding(.top, 18)
@@ -71,15 +64,60 @@ struct AdSignInView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(SanctumBackground())
     }
+
+    @ViewBuilder
+    private var signInButton: some View {
+        if APIConfig.isUITesting {
+            // The system sheet can't be driven from a UI test, so the walk-through
+            // build keeps the hand-styled button and goes straight through.
+            Button { session.signInForTesting() } label: { appleButtonLabel }
+                .buttonStyle(.plain)
+        } else {
+            SignInWithAppleButton(.signIn) { request in
+                request.requestedScopes = [.email]
+            } onCompletion: { result in
+                Task { await session.completeAppleSignIn(result) }
+            }
+            .signInWithAppleButtonStyle(c.isDark ? .white : .black)
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .clipShape(.rect(cornerRadius: 12))
+            .opacity(session.signingIn ? 0.6 : 1)
+            .disabled(session.signingIn)
+            .accessibilityIdentifier("Sign in with Apple")
+        }
+    }
+
+    private var appleButtonLabel: some View {
+        HStack(spacing: 9) {
+            Image(systemName: "apple.logo")
+                .font(.system(size: 17, weight: .medium))
+            Text("Sign in with Apple")
+                .font(AdFont.sans(15.5, weight: .semibold))
+        }
+        .foregroundStyle(c.inverseFg)
+        .frame(maxWidth: .infinity, minHeight: 50)
+        .background(c.inverseBg, in: .rect(cornerRadius: 12))
+    }
 }
 
 // MARK: - PIN lock
 
 struct AdPinLockView: View {
     @Environment(\.palette) private var c
-    let onUnlock: () -> Void
+    @Environment(AdminSession.self) private var session
 
-    @State private var pinLength = 0
+    let profile: AdminProfile
+
+    private enum Mode: Equatable {
+        case create
+        case confirm(String)
+        case unlock
+    }
+
+    @State private var digits = ""
+    @State private var mode: Mode = .unlock
+    @State private var error: String?
+    @State private var shake = 0
 
     private let keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "del"]
 
@@ -93,25 +131,29 @@ struct AdPinLockView: View {
                 .overlay(RoundedRectangle(cornerRadius: 16).strokeBorder(c.border))
                 .padding(.top, 38)
 
-            Text("Enter your PIN")
+            Text(title)
                 .font(AdFont.display(30))
                 .foregroundStyle(c.fg)
+                .multilineTextAlignment(.center)
                 .padding(.top, 22)
 
-            Text(AdminUser.current.name)
+            Text(error ?? subtitle)
                 .font(AdFont.sans(13))
-                .foregroundStyle(c.fgMuted)
+                .foregroundStyle(error == nil ? c.fgMuted : c.destructive)
+                .multilineTextAlignment(.center)
                 .padding(.top, 8)
 
             HStack(spacing: 14) {
                 ForEach(0..<4, id: \.self) { i in
                     Circle()
-                        .fill(i < pinLength ? c.glow : .clear)
+                        .fill(i < digits.count ? c.glow : .clear)
                         .frame(width: 13, height: 13)
-                        .overlay(Circle().strokeBorder(i < pinLength ? c.glow : c.border, lineWidth: 1.5))
+                        .overlay(Circle().strokeBorder(i < digits.count ? c.glow : c.border, lineWidth: 1.5))
                 }
             }
             .padding(.top, 34)
+            .modifier(ShakeEffect(travel: CGFloat(shake)))
+            .animation(.default, value: shake)
 
             Spacer(minLength: 0)
 
@@ -135,20 +177,43 @@ struct AdPinLockView: View {
                 }
             }
 
-            Button {
-                unlock()
-            } label: {
-                Text("Use Face ID instead")
-                    .font(AdFont.sans(13, weight: .semibold))
-                    .foregroundStyle(c.accent)
+            if mode == .unlock, session.lock.biometricsAvailable {
+                Button {
+                    Task {
+                        if await session.lock.biometricUnlock() { session.unlock() }
+                    }
+                } label: {
+                    Text("Use Face ID instead")
+                        .font(AdFont.sans(13, weight: .semibold))
+                        .foregroundStyle(c.accent)
+                }
+                .buttonStyle(.plain)
+                .padding(.top, 26)
+                .padding(.bottom, 28)
+            } else {
+                Color.clear.frame(height: 1).padding(.top, 26).padding(.bottom, 28)
             }
-            .buttonStyle(.plain)
-            .padding(.top, 26)
-            .padding(.bottom, 28)
         }
         .padding(.horizontal, 26)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(SanctumBackground())
+        .onAppear { mode = session.lock.isEnrolled ? .unlock : .create }
+    }
+
+    private var title: String {
+        switch mode {
+        case .create: return "Choose a PIN"
+        case .confirm: return "Confirm your PIN"
+        case .unlock: return "Enter your PIN"
+        }
+    }
+
+    private var subtitle: String {
+        switch mode {
+        case .create: return "Four digits, asked for whenever the console has been away."
+        case .confirm: return "Once more, to be sure."
+        case .unlock: return profile.email
+        }
     }
 
     private func keypadButton(_ key: String, @ViewBuilder label: () -> some View) -> some View {
@@ -164,19 +229,71 @@ struct AdPinLockView: View {
     }
 
     private func tap(_ key: String) {
+        error = nil
         if key == "del" {
-            pinLength = max(0, pinLength - 1)
-        } else if pinLength >= 3 {
-            pinLength = 4
-            unlock()
-        } else {
-            pinLength += 1
+            if !digits.isEmpty { digits.removeLast() }
+            return
+        }
+        guard digits.count < 4 else { return }
+        digits.append(key)
+        guard digits.count == 4 else { return }
+
+        let entered = digits
+        // Let the fourth dot land before the screen changes under them.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+            submit(entered)
         }
     }
 
-    private func unlock() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-            onUnlock()
+    private func submit(_ entered: String) {
+        switch mode {
+        case .create:
+            digits = ""
+            mode = .confirm(entered)
+
+        case .confirm(let first):
+            digits = ""
+            guard entered == first else {
+                mode = .create
+                fail("Those didn't match. Start again.")
+                return
+            }
+            try? session.lock.enroll(pin: entered)
+            session.unlock()
+
+        case .unlock:
+            if session.lock.verify(pin: entered) {
+                digits = ""
+                session.unlock()
+            } else {
+                digits = ""
+                if session.lock.isLockedOut {
+                    // Five wrong tries: start over with Apple. Two taps to get back.
+                    Task { await session.signOut(reason: .userInitiated) }
+                } else {
+                    let left = AppLock.maxAttempts - session.lock.failedAttempts
+                    fail("Not that one. \(left) \(left == 1 ? "try" : "tries") left.")
+                }
+            }
         }
+    }
+
+    private func fail(_ message: String) {
+        error = message
+        shake += 1
+    }
+}
+
+/// A short sideways nudge when a PIN is wrong.
+private struct ShakeEffect: GeometryEffect {
+    var travel: CGFloat
+
+    var animatableData: CGFloat {
+        get { travel }
+        set { travel = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        ProjectionTransform(CGAffineTransform(translationX: sin(travel * .pi * 4) * 8, y: 0))
     }
 }

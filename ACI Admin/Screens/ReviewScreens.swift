@@ -326,7 +326,7 @@ struct AdAudioPanel: View {
         0.4, 0.8, 0.55, 0.7, 0.45, 0.9, 0.6, 0.35, 0.75, 0.5, 0.65, 0.85, 0.4, 0.7, 0.55, 0.95, 0.6, 0.45, 0.8, 0.5,
     ]
 
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
 
     init(audio: AudioInfo, langCode: String) {
         self.audio = audio
@@ -419,12 +419,19 @@ struct AdAudioPanel: View {
         .padding(EdgeInsets(top: 14, leading: 15, bottom: 14, trailing: 15))
         .background(c.card, in: .rect(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).strokeBorder(playing ? c.glowSoft : c.cardEdge))
-        .onReceive(ticker) { _ in
+        // Ticks only while playing. An always-on Timer.publish keeps the run loop
+        // busy forever, which stops the app ever reporting itself idle — UI tests
+        // then hang waiting to interact with this screen.
+        .task(id: playing) {
             guard playing else { return }
-            if position + 1 >= total {
-                position = total
-                playing = false
-            } else {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard !Task.isCancelled, playing else { return }
+                if position + 1 >= total {
+                    position = total
+                    playing = false
+                    return
+                }
                 position += 1
             }
         }

@@ -18,7 +18,7 @@ struct AdRecurringView: View {
     let onEdit: (RecurringRule?) -> Void
 
     var body: some View {
-        AdShell {
+        AdShell(onRefresh: { await store.loadRules(force: true) }) {
             AdTitle("Recurring", sub: "Notices that send themselves on a schedule. Skip a single date without touching the rule.")
 
             AdButton(label: "New recurring notice", icon: "plus", variant: .secondary, full: true) {
@@ -26,21 +26,35 @@ struct AdRecurringView: View {
             }
             .padding(.horizontal, 20)
 
-            AdEyebrow(eyebrowText)
+            AdLoadState(store.rulesState, retry: { await store.loadRules(force: true) }) { rules in
+                if rules.isEmpty {
+                    AdEmptyState(
+                        icon: "repeat",
+                        title: "No recurring notices",
+                        message: "These send themselves on a schedule — a daily devotion prompt, a Sunday service reminder.",
+                        actionLabel: "Set one up"
+                    ) { onEdit(nil) }
+                } else {
+                    AdEyebrow(eyebrowText(rules))
 
-            VStack(spacing: 8) {
-                ForEach(store.recurring) { rule in
-                    ruleCard(rule)
+                    VStack(spacing: 8) {
+                        ForEach(rules) { rule in
+                            ruleCard(rule)
+                        }
+                    }
+                    .padding(.horizontal, 20)
                 }
             }
-            .padding(.horizontal, 20)
         }
+        .task { await store.loadRules() }
     }
 
-    private var eyebrowText: String {
-        let active = store.recurring.filter(\.active).count
-        let skips = store.recurring.reduce(0) { $0 + $1.skips.count }
-        return skips > 0 ? "\(active) active · \(skips) date skipped" : "\(active) active"
+    private func eyebrowText(_ rules: [RecurringRule]) -> String {
+        let active = rules.filter(\.active).count
+        // Only skips still ahead are worth counting; past ones have already happened.
+        let skips = rules.reduce(0) { $0 + $1.upcomingSkips.count }
+        guard skips > 0 else { return "\(active) active" }
+        return "\(active) active · \(skips) date\(skips == 1 ? "" : "s") skipped"
     }
 
     private func ruleCard(_ rule: RecurringRule) -> some View {
@@ -69,7 +83,7 @@ struct AdRecurringView: View {
 
                 AdToggle(isOn: Binding(
                     get: { store.rule(rule.id)?.active ?? rule.active },
-                    set: { _ in store.toggleRule(rule.id) }
+                    set: { isOn in Task { await store.setRuleActive(rule.id, isOn) } }
                 ))
             }
 
@@ -81,12 +95,12 @@ struct AdRecurringView: View {
                 .padding(.top, 10)
 
             HStack(spacing: 10) {
-                Text(rule.sender + (rule.skips.isEmpty ? "" : " · \(rule.skips.count) skipped"))
+                Text(rule.sender + (rule.upcomingSkips.isEmpty ? "" : " · \(rule.upcomingSkips.count) skipped"))
                     .font(AdFont.sans(11.5))
                     .foregroundStyle(c.fgMuted)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                if !rule.skips.isEmpty {
+                if !rule.upcomingSkips.isEmpty {
                     AdChip(status: .skipped)
                 }
 
@@ -134,22 +148,24 @@ struct AdRecurringComposeView: View {
     @State private var kind: RecurrenceKind
     @State private var days: [Int]
     @State private var dayOfMonth: Int
-    @State private var time: String
+    @State private var time: TimeOfDay
+    @State private var submitting = false
 
     init(editing: RecurringRule?) {
         self.editing = editing
         _title = State(initialValue: editing?.title ?? "")
         _message = State(initialValue: editing?.message ?? "")
-        _sender = State(initialValue: editing?.sender ?? AdminUser.current.church)
+        _sender = State(initialValue: editing?.sender.isEmpty == false ? editing!.sender : APIConfig.churchName)
         _kind = State(initialValue: editing?.kind ?? .weekly)
         _days = State(initialValue: editing?.days.isEmpty == false ? editing!.days : [0])
         _dayOfMonth = State(initialValue: editing?.dayOfMonth ?? 1)
-        _time = State(initialValue: editing?.time ?? "6:00 am")
+        _time = State(initialValue: editing?.sendTime ?? AdminTimes.default)
     }
 
     private var draftRule: RecurringRule {
         RecurringRule(id: "draft", title: title, message: message, sender: sender,
-                      kind: kind, days: days, dayOfMonth: dayOfMonth, time: time, active: true)
+                      kind: kind, days: days, dayOfMonth: dayOfMonth,
+                      sendTime: time, active: true)
     }
 
     private var ruleReady: Bool { kind != .weekly || !days.isEmpty }
@@ -171,7 +187,7 @@ struct AdRecurringComposeView: View {
             AdField(label: "Title", text: $title, placeholder: "Tuesday evening service", chars: 65)
             AdField(label: "Message", text: $message,
                     placeholder: "The same words go out every time — keep them evergreen.", rows: 4, chars: 280)
-            AdField(label: "Sender", text: $sender, placeholder: AdminUser.current.church)
+            AdField(label: "Sender", text: $sender, placeholder: APIConfig.churchName)
 
             AdEyebrow("Repeats")
             AdSegmented(
@@ -229,8 +245,8 @@ struct AdRecurringComposeView: View {
 
             AdEyebrow("Send at")
             FlowLayout(spacing: 6) {
-                ForEach(SampleData.times, id: \.self) { tm in
-                    AdPill(label: tm, on: time == tm) { time = tm }
+                ForEach(AdminTimes.options, id: \.self) { option in
+                    AdPill(label: option.display, on: time == option) { time = option }
                 }
             }
             .padding(.horizontal, 20)
@@ -257,7 +273,7 @@ struct AdRecurringComposeView: View {
                                 Image(systemName: "clock")
                                     .font(.system(size: 11))
                                     .foregroundStyle(c.accent)
-                                Text("\(AdminDates.long(o.date))\(o.offset == 0 ? " · today" : "") at \(time)")
+                                Text("\(AdminDates.long(o.date))\(o.day.isToday ? " · today" : "") at \(time.display)")
                                     .font(AdFont.sans(12.5))
                                     .foregroundStyle(c.fgSecondary)
                             }
@@ -285,20 +301,50 @@ struct AdRecurringComposeView: View {
             }
 
             HStack(spacing: 8) {
-                AdButton(label: "Save paused", variant: .secondary, disabled: !ready) {
-                    finish("Saved — paused for now")
+                AdButton(label: "Save paused", variant: .secondary, disabled: !ready || submitting) {
+                    save(active: false, toast: "Saved — paused for now")
                 }
-                AdButton(label: "Save & switch on", icon: "repeat", full: true, disabled: !ready) {
-                    finish("Recurring notice switched on")
+                AdButton(label: "Save & switch on", icon: "repeat", full: true,
+                         disabled: !ready || submitting, loading: submitting) {
+                    save(active: true, toast: "Recurring notice switched on")
                 }
             }
             .padding(EdgeInsets(top: 14, leading: 20, bottom: 0, trailing: 20))
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             AdTopBar(title: editing == nil ? "New recurring notice" : "Edit recurring notice") {
-                AdTopBarAction(label: "Save", enabled: ready) {
-                    finish("Recurring notice switched on")
+                AdTopBarAction(label: "Save", enabled: ready && !submitting, loading: submitting) {
+                    save(active: editing?.active ?? true,
+                         toast: editing == nil ? "Recurring notice switched on" : "Changes saved")
                 }
+            }
+        }
+    }
+
+    private var draft: RuleDraft {
+        var draft = RuleDraft()
+        draft.title = title
+        draft.message = message
+        draft.sender = sender
+        draft.kind = kind
+        draft.days = days
+        draft.dayOfMonth = dayOfMonth
+        draft.sendTime = time
+        return draft
+    }
+
+    private func save(active: Bool, toast: String) {
+        guard !submitting else { return }
+        submitting = true
+        Task {
+            defer { submitting = false }
+            do throws(APIError) {
+                // This endpoint replaces the whole definition — it rejects a partial
+                // body — so the draft always sends every field.
+                _ = try await store.saveRule(draft, id: editing?.id, active: active)
+                finish(toast)
+            } catch {
+                store.flashError(error)
             }
         }
     }
@@ -317,13 +363,14 @@ struct AdScheduleView: View {
 
     let ruleID: RecurringRule.ID
 
-    @State private var confirming: RecurringRule.Occurrence? = nil
+    @State private var confirming: RuleOccurrence? = nil
 
     private var rule: RecurringRule? { store.rule(ruleID) }
 
     var body: some View {
         if let rule {
             content(rule)
+                .task { await store.loadOccurrences(ruleID) }
         }
     }
 
@@ -331,9 +378,9 @@ struct AdScheduleView: View {
         AdShell {
             AdTitle(
                 Text("Next \(Text("sends.").italic().foregroundStyle(c.accent))"),
-                sub: rule.skips.isEmpty
+                sub: rule.upcomingSkips.isEmpty
                     ? "Tap Skip on any date to hold that one send. The rule itself stays as it is."
-                    : "\(rule.skips.count) upcoming date\(rule.skips.count == 1 ? "" : "s") skipped. The rule itself stays as it is."
+                    : "\(rule.upcomingSkips.count) upcoming date\(rule.upcomingSkips.count == 1 ? "" : "s") skipped. The rule itself stays as it is."
             )
 
             AdCard {
@@ -362,13 +409,17 @@ struct AdScheduleView: View {
             .padding(.horizontal, 20)
 
             AdEyebrow("Upcoming occurrences")
-            AdCard(flush: true) {
-                let occurrences = rule.occurrences(count: 10)
-                ForEach(Array(occurrences.enumerated()), id: \.element.id) { i, o in
-                    occurrenceRow(rule, o, first: i == 0)
+            AdLoadState(
+                store.occurrencesState[ruleID] ?? .loading,
+                retry: { await store.loadOccurrences(ruleID, force: true) }
+            ) { occurrences in
+                AdCard(flush: true) {
+                    ForEach(Array(occurrences.enumerated()), id: \.element.id) { i, o in
+                        occurrenceRow(rule, o, first: i == 0)
+                    }
                 }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
 
             AdHintRow(icon: "sparkle",
                       text: "Skipping affects one date only. To stop the notice entirely, switch it off on the Recurring tab.")
@@ -378,15 +429,15 @@ struct AdScheduleView: View {
         }
         .adSheet(
             isPresented: Binding(get: { confirming != nil }, set: { if !$0 { confirming = nil } }),
-            title: confirming.map { "Skip \(AdminDates.long($0.date))?" } ?? ""
+            title: confirming.map { "Skip \(AdminDates.long($0.day.date()))?" } ?? ""
         ) {
             if let o = confirming {
-                Text("\(Text(rule.title).fontWeight(.semibold).foregroundStyle(c.fg)) will not send\(o.offset == 0 ? " today" : " on \(AdminDates.short(o.date))") at \(rule.time). Every other date on this schedule is unaffected, and you can restore it any time.")
+                Text("\(Text(rule.title).fontWeight(.semibold).foregroundStyle(c.fg)) will not send\(o.isToday ? " today" : " on \(AdminDates.short(o.day.date()))") at \(o.time.display). Every other date on this schedule is unaffected, and you can restore it any time.")
             }
         } actions: {
             AdButton(label: "Skip this date", variant: .danger, full: true) {
                 if let o = confirming {
-                    store.toggleSkip(rule.id, offset: o.offset)
+                    Task { await store.setSkip(rule.id, day: o.day, skipped: true) }
                 }
                 confirming = nil
             }
@@ -396,10 +447,11 @@ struct AdScheduleView: View {
         }
     }
 
-    private func occurrenceRow(_ rule: RecurringRule, _ o: RecurringRule.Occurrence, first: Bool) -> some View {
-        let isSkipped = rule.skips.contains(o.offset)
-        let isToday = o.offset == 0
-        let dayNumber = Calendar.current.component(.day, from: o.date)
+    private func occurrenceRow(_ rule: RecurringRule, _ o: RuleOccurrence, first: Bool) -> some View {
+        let isSkipped = o.skipped
+        let isToday = o.isToday
+        let dayNumber = o.day.day
+        let working = store.isBusy(.skip(rule.id, o.day))
 
         return HStack(spacing: 12) {
             Text("\(dayNumber)")
@@ -412,9 +464,9 @@ struct AdScheduleView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(isSkipped ? c.border : (isToday ? .clear : c.cardEdge)))
 
             VStack(alignment: .leading, spacing: 2) {
-                Text("\(Text(AdminDates.short(o.date)).strikethrough(isSkipped, color: c.fgMuted).foregroundStyle(isSkipped ? c.fgMuted : c.fg))\(isToday ? Text(" · today").fontWeight(.bold).foregroundStyle(c.accent) : Text(""))")
+                Text("\(Text(AdminDates.short(o.day.date())).strikethrough(isSkipped, color: c.fgMuted).foregroundStyle(isSkipped ? c.fgMuted : c.fg))\(isToday ? Text(" · today").fontWeight(.bold).foregroundStyle(c.accent) : Text(""))")
                     .font(AdFont.sans(14, weight: .semibold))
-                Text(isSkipped ? "Skipped — nothing will send" : rule.time)
+                Text(isSkipped ? "Skipped — nothing will send" : o.time.display)
                     .font(AdFont.sans(11.5))
                     .foregroundStyle(c.fgMuted)
             }
@@ -422,7 +474,7 @@ struct AdScheduleView: View {
 
             Button {
                 if isSkipped {
-                    store.toggleSkip(rule.id, offset: o.offset)
+                    Task { await store.setSkip(rule.id, day: o.day, skipped: false) }
                 } else {
                     confirming = o
                 }
@@ -434,8 +486,10 @@ struct AdScheduleView: View {
                     .frame(minHeight: 32)
                     .background(isSkipped ? c.surfaceRaised : .clear, in: .rect(cornerRadius: 9))
                     .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(isSkipped ? c.cardEdge : c.border))
+                    .opacity(working ? 0.5 : 1)
             }
             .buttonStyle(.plain)
+            .disabled(working)
         }
         .padding(EdgeInsets(top: 11, leading: 14, bottom: 11, trailing: 14))
         .overlay(alignment: .top) {

@@ -29,6 +29,10 @@
 		6D75D98A30447E20007E8DCC /* ACI AdminUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = "ACI AdminUITests.xctest"; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXBuildFile section */
+		6DA1000230447E1E007E8DCC /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = 6DA1000130447E1E007E8DCC /* Supabase */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		6D75D97330447E1E007E8DCC /* ACI Admin */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6DA1000230447E1E007E8DCC /* Supabase in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = "ACI Admin";
 			packageProductDependencies = (
+				6DA1000130447E1E007E8DCC /* Supabase */,
 			);
 			productName = "ACI Admin";
 			productReference = 6D75D97130447E1E007E8DCC /* ACI Admin.app */;
@@ -196,6 +202,9 @@
 			mainGroup = 6D75D96830447E1E007E8DCC;
 			minimizedProjectReferenceProxies = 1;
 			preferredProjectObjectVersion = 77;
+			packageReferences = (
+				6DA1000030447E1E007E8DCC /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			productRefGroup = 6D75D97230447E1E007E8DCC /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -400,6 +409,9 @@
 				DEVELOPMENT_TEAM = K66TNVQ7ZM;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				CODE_SIGN_ENTITLEMENTS = "ACI Admin.entitlements";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Unlocks the console without typing your PIN.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +444,9 @@
 				DEVELOPMENT_TEAM = K66TNVQ7ZM;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				CODE_SIGN_ENTITLEMENTS = "ACI Admin.entitlements";
+				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
+				INFOPLIST_KEY_NSFaceIDUsageDescription = "Unlocks the console without typing your PIN.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -539,6 +554,25 @@
 			name = Release;
 		};
 /* End XCBuildConfiguration section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		6DA1000030447E1E007E8DCC /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase-community/supabase-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		6DA1000130447E1E007E8DCC /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6DA1000030447E1E007E8DCC /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCConfigurationList section */
 		6D75D96C30447E1E007E8DCC /* Build configuration list for PBXProject "ACI Admin" */ = {

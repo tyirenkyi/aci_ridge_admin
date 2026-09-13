@@ -11,15 +11,18 @@ import Observation
 
 // MARK: - Dates
 
-enum AdminDates {
-    static let today: Date = Calendar.current.startOfDay(for: Date())
+nonisolated enum AdminDates {
+    /// Computed, not stored: a console left open overnight must not keep yesterday's
+    /// idea of "today". Always the church's day — see Calendar.ghana.
+    static var today: Date { Calendar.ghana.startOfDay(for: Date()) }
 
-    static func add(_ days: Int, to date: Date = today) -> Date {
-        Calendar.current.date(byAdding: .day, value: days, to: date) ?? date
+    static func add(_ days: Int, to date: Date = AdminDates.today) -> Date {
+        Calendar.ghana.date(byAdding: .day, value: days, to: date) ?? date
     }
 
     private static let shortFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.timeZone = Calendar.ghana.timeZone
         f.locale = Locale(identifier: "en_GB")
         f.dateFormat = "EEE d MMM"
         return f
@@ -27,6 +30,7 @@ enum AdminDates {
 
     private static let longFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.timeZone = Calendar.ghana.timeZone
         f.locale = Locale(identifier: "en_US")
         f.dateFormat = "EEEE, MMMM d"
         return f
@@ -44,6 +48,20 @@ enum AdminDates {
         case 0: return "Today"
         case 1: return "Tomorrow"
         default: return long ? Self.long(add(offset)) : short(add(offset))
+        }
+    }
+
+    /// How a notice states its send time: "Today 6:00 am", "Tomorrow 6:00 am",
+    /// "Fri 6:00 am" inside the week, "Sun 30 Aug · 6:00 am" beyond it.
+    static func whenLabel(_ date: Date?) -> String {
+        guard let date else { return "Not scheduled" }
+        let day = CalendarDay(date)
+        let time = TimeOfDay(date).display
+        switch day.offsetFromToday() {
+        case 0: return "Today \(time)"
+        case 1: return "Tomorrow \(time)"
+        case 2...6: return "\(dayShort[day.weekdayIndex]) \(time)"
+        default: return "\(short(date)) · \(time)"
         }
     }
 
@@ -66,42 +84,47 @@ enum AdminDates {
     }
 }
 
-// MARK: - Admin
-
-struct AdminUser {
-    let name: String
-    let email: String
-    let church: String
-    let initials: String
-
-    static let current = AdminUser(
-        name: "Franklin Owusu",
-        email: "franklin@acirid.ge",
-        church: "Ridge Community Cathedral",
-        initials: "FO"
-    )
-}
-
 // MARK: - Notices
 
-enum NoticeStatus: String, Hashable {
+nonisolated enum NoticeStatus: String, Hashable {
     case scheduled, sent, draft
 }
 
-struct Notice: Identifiable, Hashable {
+nonisolated struct Notice: Identifiable, Hashable, Sendable {
     let id: String
     var title: String
     var message: String
+    /// Empty when the server has none; the composer falls back to the church name.
     var sender: String
     var status: NoticeStatus
-    var when: String
-    var audience: String
-    var opens: String? = nil
+    var scheduledAt: Date?
+    var sentAt: Date?
+    /// How many members opened it. The server computes this; there is no per-member
+    /// receipt endpoint.
+    var opens: Int = 0
+    var createdAt: Date?
+
+    /// Was a stored display string in the prototype; derived now so it can never
+    /// drift from the dates behind it.
+    var when: String {
+        switch status {
+        case .draft: return "Not scheduled"
+        case .scheduled: return AdminDates.whenLabel(scheduledAt)
+        case .sent: return "Sent \(AdminDates.whenLabel(sentAt))"
+        }
+    }
+
+    var opensLabel: String? {
+        status == .sent ? "\(opens) opened" : nil
+    }
+
+    /// A sent notice is history: the server rejects edits and deletes with a 409.
+    var isEditable: Bool { status != .sent }
 }
 
 // MARK: - Recurring
 
-enum RecurrenceKind: String, Hashable, CaseIterable {
+nonisolated enum RecurrenceKind: String, Hashable, CaseIterable {
     case daily, weekly, monthly
 
     var label: String {
@@ -113,17 +136,30 @@ enum RecurrenceKind: String, Hashable, CaseIterable {
     }
 }
 
-struct RecurringRule: Identifiable, Hashable {
+nonisolated struct RecurringRule: Identifiable, Hashable, Sendable {
     let id: String
     var title: String
     var message: String
     var sender: String
     var kind: RecurrenceKind
+    /// 0 = Sunday, matching the server's getUTCDay().
     var days: [Int] = []
+    /// 1...28. Capped so every month actually has the date.
     var dayOfMonth: Int = 1
-    var time: String
+    var sendTime: TimeOfDay
     var active: Bool
-    var skips: [Int] = []
+    /// Absolute dates, as the server stores them. The prototype used offsets from
+    /// launch day, which went stale the moment the app stayed open past midnight.
+    var skips: Set<CalendarDay> = []
+    var nextOccurrence: CalendarDay?
+
+    /// Kept so `ruleLabel` and the screens read the same as they always did.
+    var time: String { sendTime.display }
+
+    /// Skips that still lie ahead — the only ones worth counting in the UI.
+    var upcomingSkips: Set<CalendarDay> { skips.filter { $0 >= .today } }
+
+    func isSkipped(_ day: CalendarDay) -> Bool { skips.contains(day) }
 
     /// The human sentence the rule adds up to.
     var ruleLabel: String {
@@ -143,50 +179,99 @@ struct RecurringRule: Identifiable, Hashable {
         }
     }
 
-    struct Occurrence: Identifiable {
+    struct Occurrence: Identifiable, Hashable {
         let offset: Int
-        let date: Date
+        let day: CalendarDay
         var id: Int { offset }
+        var date: Date { day.date() }
     }
 
-    /// Next occurrences of the rule, starting today.
+    /// Occurrences worked out on the device.
+    ///
+    /// This mirrors the server's own calculation and exists for the compose screen's
+    /// preview, where the rule doesn't exist yet so there is nothing to ask about.
+    /// Anywhere a saved rule is shown, prefer GET /api/rules/:id/occurrences — it is
+    /// authoritative and already knows which dates are skipped. Keep the two in step.
     func occurrences(count: Int = 8) -> [Occurrence] {
         var out: [Occurrence] = []
         var i = 0
-        let cal = Calendar.current
+        let start = CalendarDay.today
         while out.count < count && i < 120 {
-            let d = AdminDates.add(i)
+            let day = start.adding(days: i)
             let hit: Bool
             switch kind {
             case .daily: hit = true
-            case .weekly: hit = days.contains(cal.component(.weekday, from: d) - 1)
-            case .monthly: hit = cal.component(.day, from: d) == dayOfMonth
+            case .weekly: hit = days.contains(day.weekdayIndex)
+            case .monthly: hit = day.day == dayOfMonth
             }
-            if hit { out.append(Occurrence(offset: i, date: d)) }
+            if hit { out.append(Occurrence(offset: i, day: day)) }
             i += 1
         }
         return out
     }
 }
 
+/// One scheduled send, as the server reports it.
+nonisolated struct RuleOccurrence: Identifiable, Hashable, Sendable {
+    let day: CalendarDay
+    let time: TimeOfDay
+    var skipped: Bool
+
+    var id: String { day.iso }
+    var isToday: Bool { day.isToday }
+    var date: Date { day.date(at: time) }
+}
+
 // MARK: - Events
 
-enum EventStatus: String, Hashable {
+nonisolated enum EventStatus: String, Hashable {
     case published, draft
 }
 
-struct ChurchEvent: Identifiable, Hashable {
+nonisolated enum EventTone: String, Hashable, Sendable, CaseIterable {
+    case burgundy, gold, sapphire, emerald
+}
+
+nonisolated struct ChurchEvent: Identifiable, Hashable, Sendable {
     let id: String
     var name: String
     var description: String
+    /// Required by the server, and what ordering and expiry actually run on.
+    var startsAt: Date
+    var endsAt: Date?
+    /// The sentence members read. Auto-filled from the dates, but an admin can say
+    /// it better than a date pair can — "Sept 12–14 · daily from 8:00 am".
     var timeLabel: String
     var location: String
+    var tone: EventTone = .burgundy
     var status: EventStatus
+
+    var displayTime: String {
+        timeLabel.isEmpty ? EventDates.label(startsAt, endsAt) : timeLabel
+    }
+}
+
+/// How an event's dates read when nobody has written a label by hand.
+nonisolated enum EventDates {
+    static func label(_ starts: Date, _ ends: Date?) -> String {
+        let startDay = CalendarDay(starts)
+        let startTime = TimeOfDay(starts).display
+        let dayText = AdminDates.long(starts)
+
+        guard let ends else { return "\(dayText) · \(startTime)" }
+
+        let endDay = CalendarDay(ends)
+        let endTime = TimeOfDay(ends).display
+        if endDay == startDay {
+            return "\(dayText), \(startTime) — \(endTime)"
+        }
+        return "\(AdminDates.short(starts)) \(startTime) — \(AdminDates.short(ends)) \(endTime)"
+    }
 }
 
 // MARK: - Today's queue
 
-struct QueueItem: Identifiable, Hashable {
+nonisolated struct QueueItem: Identifiable, Hashable {
     enum State { case sent, pending }
     let id: String
     let time: String
@@ -198,7 +283,7 @@ struct QueueItem: Identifiable, Hashable {
 
 // MARK: - Translations
 
-struct Language: Hashable, Identifiable {
+nonisolated struct Language: Hashable, Identifiable {
     let code: String     // FR
     let value: String    // fr
     let native: String   // Français
@@ -210,11 +295,11 @@ struct Language: Hashable, Identifiable {
     static let all: [Language] = [.french, .spanish]
 }
 
-enum ReviewStatus: String, Hashable {
+nonisolated enum ReviewStatus: String, Hashable {
     case pending, approved, rejected
 }
 
-struct TranslationField: Hashable {
+nonisolated struct TranslationField: Hashable {
     let label: String
     let source: String
     let draft: String
@@ -223,7 +308,7 @@ struct TranslationField: Hashable {
     var usesSerif: Bool { label == "Body" || label.hasPrefix("Declaration") }
 }
 
-struct AudioInfo: Hashable {
+nonisolated struct AudioInfo: Hashable {
     let duration: String
     let voice: String
     let recorded: String
@@ -236,7 +321,7 @@ struct AudioInfo: Hashable {
     }
 }
 
-struct TranslationItem: Identifiable, Hashable {
+nonisolated struct TranslationItem: Identifiable, Hashable {
     let id: String
     /// 0 = today, -1 = tomorrow (mirrors the design's sign convention).
     let offset: Int
@@ -253,60 +338,64 @@ struct TranslationItem: Identifiable, Hashable {
 
 // MARK: - Sample content
 
-enum SampleData {
+nonisolated enum SampleData {
+    /// A few fixed points so the fixtures read the same every run.
+    private static func at(_ days: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+        CalendarDay.today.adding(days: days).date(at: TimeOfDay(hour: hour, minute: minute) ?? .midnight)
+    }
+
     static let notices: [Notice] = [
         Notice(id: "n1", title: "Baptism service this Sunday",
                message: "Candidates should arrive by 6:30 am with a change of white clothing. Families are welcome to stay for the whole service.",
                sender: "Ridge Community Cathedral", status: .scheduled,
-               when: "Fri 6:00 am", audience: "All members"),
+               scheduledAt: at(3, 6), sentAt: nil),
         Notice(id: "n2", title: "Choir rehearsal moved",
                message: "Thursday rehearsal now begins at 6:30 pm in the main hall instead of the annex.",
                sender: "Josephine Nyarko", status: .sent,
-               when: "Sent Tue 4:12 pm", audience: "All members", opens: "412 opened"),
+               scheduledAt: nil, sentAt: at(-1, 16, 12), opens: 412),
         Notice(id: "n3", title: "Building fund update",
                message: "The east wing roofing is complete. Thank you for your faithfulness — a full report follows on Sunday.",
                sender: "Church office", status: .draft,
-               when: "Not scheduled", audience: "All members"),
+               scheduledAt: nil, sentAt: nil),
     ]
 
     static let recurring: [RecurringRule] = [
         RecurringRule(id: "r1", title: "Today's Lamp is ready",
                       message: "Your devotion for today is live. Take five quiet minutes before the day begins.",
-                      sender: "The Lamp", kind: .daily, time: "5:30 am", active: true, skips: [3]),
+                      sender: "The Lamp", kind: .daily,
+                      sendTime: TimeOfDay(hour: 5, minute: 30)!, active: true,
+                      skips: [CalendarDay.today.adding(days: 3)]),
         RecurringRule(id: "r2", title: "First service starts in one hour",
                       message: "Sunday first service begins at 7:00 am. 31 Volta Street, Ridge.",
-                      sender: "Church office", kind: .weekly, days: [0], time: "6:00 am", active: true),
+                      sender: "Church office", kind: .weekly, days: [0],
+                      sendTime: TimeOfDay(hour: 6, minute: 0)!, active: true),
         RecurringRule(id: "r3", title: "Tuesday evening service",
                       message: "Midweek service begins at 6:00 pm. Come as you are.",
-                      sender: "Church office", kind: .weekly, days: [2], time: "4:00 pm", active: true),
+                      sender: "Church office", kind: .weekly, days: [2],
+                      sendTime: TimeOfDay(hour: 16, minute: 0)!, active: true),
         RecurringRule(id: "r4", title: "Communion Sunday",
                       message: "We break bread together this morning. Please prepare your heart.",
-                      sender: "Ridge Community Cathedral", kind: .monthly, dayOfMonth: 1, time: "6:00 am", active: false),
+                      sender: "Ridge Community Cathedral", kind: .monthly, dayOfMonth: 1,
+                      sendTime: TimeOfDay(hour: 6, minute: 0)!, active: false),
     ]
 
     static let events: [ChurchEvent] = [
         ChurchEvent(id: "e1", name: "Night of Worship",
                     description: "An evening of praise with the cathedral choir and guest ministers. Doors open at 5:30 pm.",
+                    startsAt: at(2, 18), endsAt: at(2, 21),
                     timeLabel: "Friday, 6:00 pm — 9:00 pm",
                     location: "Main auditorium · 31 Volta Street", status: .published),
         ChurchEvent(id: "e2", name: "Youth Convention 2026",
                     description: "Three days for ages 13–25. Registration closes the Sunday before.",
+                    startsAt: at(9, 8), endsAt: at(11, 17),
                     timeLabel: "Sept 12–14 · daily from 8:00 am",
                     location: "Cathedral annex, Ridge", status: .published),
         ChurchEvent(id: "e3", name: "Leaders’ Retreat",
                     description: "Ministry heads and elders. Transport leaves the cathedral at 6:00 am.",
+                    startsAt: at(16, 6), endsAt: nil,
                     timeLabel: "Saturday, all day",
                     location: "Lake Bosomtwe", status: .draft),
     ]
-
-    static let queue: [QueueItem] = [
-        QueueItem(id: "q1", time: "5:30 am", title: "Today's Lamp is ready", sender: "The Lamp", state: .sent, recurring: true),
-        QueueItem(id: "q2", time: "4:00 pm", title: "Tuesday evening service", sender: "Church office", state: .pending, recurring: true),
-        QueueItem(id: "q3", time: "6:00 pm", title: "Baptism service this Sunday", sender: "Ridge Community Cathedral", state: .pending, recurring: false),
-    ]
-
-    static let times = ["4:00 am", "4:30 am", "5:00 am", "5:30 am", "6:00 am", "6:30 am", "7:00 am", "8:00 am",
-                        "9:00 am", "12:00 pm", "2:00 pm", "4:00 pm", "5:00 pm", "6:00 pm", "7:00 pm", "8:00 pm"]
 
     static let translations: [String: [TranslationItem]] = [
         "fr": [
@@ -376,62 +465,4 @@ enum SampleData {
                 audio: AudioInfo(duration: "2:54", voice: "Studio · Mateo", recorded: "Yesterday, 7:48 pm", size: "2.7 MB")),
         ],
     ]
-}
-
-// MARK: - Store
-
-/// In-memory prototype state. Holds the sample content so every screen reads
-/// from one place; the only mutations are the small visual ones the
-/// click-through needs (toggles, skips, toasts). No persistence, no network.
-@Observable
-final class AdminStore {
-    var notices: [Notice] = SampleData.notices
-    var recurring: [RecurringRule] = SampleData.recurring
-    var events: [ChurchEvent] = SampleData.events
-    var queue: [QueueItem] = SampleData.queue
-    var translations: [String: [TranslationItem]] = SampleData.translations
-    var reviewLanguage: Language = .french
-
-    var toast: String? = nil
-    private var toastTask: Task<Void, Never>? = nil
-
-    func pendingCount(_ lang: Language) -> Int {
-        (translations[lang.value] ?? []).filter { $0.status == .pending }.count
-    }
-
-    var pendingTotal: Int { Language.all.reduce(0) { $0 + pendingCount($1) } }
-
-    func rule(_ id: RecurringRule.ID) -> RecurringRule? {
-        recurring.first { $0.id == id }
-    }
-
-    func translation(_ id: TranslationItem.ID) -> TranslationItem? {
-        translations.values.joined().first { $0.id == id }
-    }
-
-    func toggleRule(_ id: RecurringRule.ID) {
-        guard let i = recurring.firstIndex(where: { $0.id == id }) else { return }
-        recurring[i].active.toggle()
-    }
-
-    func toggleSkip(_ id: RecurringRule.ID, offset: Int) {
-        guard let i = recurring.firstIndex(where: { $0.id == id }) else { return }
-        if let j = recurring[i].skips.firstIndex(of: offset) {
-            recurring[i].skips.remove(at: j)
-            flash("Date restored")
-        } else {
-            recurring[i].skips.append(offset)
-            recurring[i].skips.sort()
-            flash("Date skipped — nothing will send")
-        }
-    }
-
-    func flash(_ message: String) {
-        toastTask?.cancel()
-        toast = message
-        toastTask = Task { @MainActor in
-            try? await Task.sleep(for: .seconds(2.2))
-            if !Task.isCancelled { toast = nil }
-        }
-    }
 }
