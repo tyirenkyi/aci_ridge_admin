@@ -81,19 +81,27 @@ struct AdNoticesView: View {
                     AdChip(status: ChipStatus(n.status))
                 }
 
-                HStack(spacing: 8) {
-                    Text(n.sender)
-                        .font(AdFont.sans(11.5, weight: .semibold))
-                        .foregroundStyle(c.accent)
-                    Text("·").opacity(0.5)
-                    Text(n.when)
-                    if let opens = n.opensLabel {
-                        Text("·").opacity(0.5)
-                        Text(opens)
+                // One row could not hold sender, date, time and opens at phone
+                // width: each Text wrapped on its own and left the separators
+                // stranded mid-line. Stack them so neither line ever wraps.
+                VStack(alignment: .leading, spacing: 3) {
+                    if !n.sender.isEmpty {
+                        Text(n.sender)
+                            .font(AdFont.sans(11.5, weight: .semibold))
+                            .foregroundStyle(c.accent)
+                            .lineLimit(1)
                     }
+                    HStack(spacing: 8) {
+                        Text(n.when)
+                        if let opens = n.opensLabel {
+                            Text("·").opacity(0.5)
+                            Text(opens)
+                        }
+                    }
+                    .lineLimit(1)
+                    .font(AdFont.sans(11.5))
+                    .foregroundStyle(c.fgMuted)
                 }
-                .font(AdFont.sans(11.5))
-                .foregroundStyle(c.fgMuted)
             }
             .padding(EdgeInsets(top: 13, leading: 14, bottom: 13, trailing: 14))
             .contentShape(.rect)
