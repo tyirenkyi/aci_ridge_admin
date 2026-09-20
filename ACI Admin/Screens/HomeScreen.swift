@@ -11,6 +11,7 @@ import SwiftUI
 struct AdHomeView: View {
     @Environment(\.palette) private var c
     @Environment(AdminStore.self) private var store
+    @Environment(AdminSession.self) private var session
 
     let onReview: (Language) -> Void
     let onCompose: () -> Void
@@ -18,12 +19,14 @@ struct AdHomeView: View {
     let onRecurring: () -> Void
     let onEvents: () -> Void
 
+    private func loadDashboard() async { await store.loadAll() }
+
     private var pendingToday: Int {
         store.queue.filter { $0.state == .pending }.count
     }
 
     var body: some View {
-        AdShell {
+        AdShell(onRefresh: { await store.loadAll(force: true) }) {
             header
 
             AdTitle(
@@ -50,12 +53,20 @@ struct AdHomeView: View {
             AdEyebrow(text: "Going out today") {
                 AdLinkButton(label: "All notices", action: onQueue)
             }
-            AdCard(flush: true) {
-                ForEach(Array(store.queue.enumerated()), id: \.element.id) { i, q in
-                    queueRow(q, first: i == 0)
+            if store.noticesState.isInitialLoad || store.rulesState.isInitialLoad {
+                AdLoadingState()
+            } else if store.queue.isEmpty {
+                AdEmptyState(icon: "checkmark.circle",
+                             title: "Nothing scheduled for today",
+                             message: "Recurring notices and anything you schedule will appear here.")
+            } else {
+                AdCard(flush: true) {
+                    ForEach(Array(store.queue.enumerated()), id: \.element.id) { i, q in
+                        queueRow(q, first: i == 0)
+                    }
                 }
+                .padding(.horizontal, 20)
             }
-            .padding(.horizontal, 20)
 
             AdEyebrow("Manage")
             VStack(spacing: 8) {
@@ -70,24 +81,26 @@ struct AdHomeView: View {
             }
             .padding(.horizontal, 20)
         }
+        .task { await loadDashboard() }
     }
 
     // MARK: Header
 
     private var header: some View {
         HStack(spacing: 12) {
-            Text(AdminUser.current.initials)
+            // /api/me answers with an address and a role, so that is what we show.
+            Text(session.profile?.initials ?? "—")
                 .font(AdFont.sans(13, weight: .bold))
                 .foregroundStyle(c.onAccent)
                 .frame(width: 38, height: 38)
                 .background(c.accent, in: .rect(cornerRadius: 11))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(AdminUser.current.name)
+                Text(session.profile?.email ?? "Signed in")
                     .font(AdFont.sans(14, weight: .semibold))
                     .foregroundStyle(c.fg)
                     .lineLimit(1)
-                Text(AdminUser.current.email)
+                Text(session.profile?.roleLabel ?? "")
                     .font(AdFont.sans(11.5))
                     .foregroundStyle(c.fgMuted)
                     .lineLimit(1)
@@ -182,7 +195,7 @@ struct AdHomeView: View {
 
     private var recurringMeta: String {
         let active = store.recurring.filter(\.active).count
-        let skips = store.recurring.reduce(0) { $0 + $1.skips.count }
+        let skips = store.recurring.reduce(0) { $0 + $1.upcomingSkips.count }
         return "\(active) active · \(skips) skipped date\(skips == 1 ? "" : "s")"
     }
 
