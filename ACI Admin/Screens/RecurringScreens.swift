@@ -31,9 +31,8 @@ struct AdRecurringView: View {
                     AdEmptyState(
                         icon: "repeat",
                         title: "No recurring notices",
-                        message: "These send themselves on a schedule — a daily devotion prompt, a Sunday service reminder.",
-                        actionLabel: "Set one up"
-                    ) { onEdit(nil) }
+                        message: "These send themselves on a schedule — a daily devotion prompt, a Sunday service reminder."
+                    )
                 } else {
                     AdEyebrow(eyebrowText(rules))
 

@@ -118,13 +118,14 @@ struct AdErrorStrip: View {
 
 /// Against a fresh server the lists are genuinely empty, and a blank screen reads as
 /// a bug rather than as "nothing here yet".
+/// Explains an empty list, and deliberately offers no button of its own: every
+/// screen that shows one already has its primary action pinned under the header,
+/// so a call to action here was the same button twice on one page.
 struct AdEmptyState: View {
     @Environment(\.palette) private var c
     let icon: String
     let title: String
     var message: String? = nil
-    var actionLabel: String? = nil
-    var action: (() -> Void)? = nil
 
     var body: some View {
         VStack(spacing: 12) {
@@ -143,11 +144,6 @@ struct AdEmptyState: View {
                     .multilineTextAlignment(.center)
                     .foregroundStyle(c.fgMuted)
                     .padding(.horizontal, 40)
-            }
-
-            if let actionLabel, let action {
-                AdButton(label: actionLabel, variant: .secondary, small: true, action: action)
-                    .padding(.top, 2)
             }
         }
         .frame(maxWidth: .infinity)

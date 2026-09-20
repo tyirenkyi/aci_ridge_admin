@@ -36,9 +36,8 @@ struct AdNoticesView: View {
                     AdEmptyState(
                         icon: "bell",
                         title: "No notices yet",
-                        message: "Anything you write here reaches every member as a push notification.",
-                        actionLabel: "Write the first one"
-                    ) { onCompose(nil) }
+                        message: "Anything you write here reaches every member as a push notification."
+                    )
                 } else {
                     ForEach(groups, id: \.0) { status, label in
                         let rows = notices.filter { $0.status == status }

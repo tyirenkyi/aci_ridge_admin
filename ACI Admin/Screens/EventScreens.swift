@@ -30,9 +30,8 @@ struct AdEventsView: View {
                     AdEmptyState(
                         icon: "calendar",
                         title: "Nothing on the calendar",
-                        message: "Published events show in the app and on the website until their date passes.",
-                        actionLabel: "Add the first event"
-                    ) { onCompose(nil) }
+                        message: "Published events show in the app and on the website until their date passes."
+                    )
                 } else {
                     AdEyebrow("\(events.count) event\(events.count == 1 ? "" : "s")")
                     VStack(spacing: 8) {
