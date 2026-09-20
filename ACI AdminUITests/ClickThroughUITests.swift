@@ -81,14 +81,29 @@ final class ClickThroughUITests: XCTestCase {
 
         // ── Review queue + item ──
         tab(app, "review")
+        // The queue is keyed by day, not by devotional title: the status endpoint
+        // reports dates and review states, and the title only arrives when a day
+        // is opened.
+        // Match the card's own eyebrow, not its day: "Today" also labels a tab,
+        // and the tab bar wins firstMatch.
         let item = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS %@", "The Stone Still Speaks")).firstMatch
+            NSPredicate(format: "label CONTAINS[c] %@", "daily devotion")).firstMatch
         XCTAssertTrue(item.waitForExistence(timeout: 5))
         snap(app, "12-review-queue")
         item.tap()
         let approve = app.buttons["Approve"]
         XCTAssertTrue(approve.waitForExistence(timeout: 5))
         snap(app, "13-review-item")
+
+        // A devotional is several recordings, not one: the narration, the
+        // declarations and one file per prayer, each pickable on its own.
+        let narration = app.buttons["Narration"]
+        XCTAssertTrue(narration.waitForExistence(timeout: 5))
+        scrollTo(app, narration)
+        for track in ["Narration", "Declarations", "Prayer 1", "Prayer 5", "Music bed"] {
+            XCTAssertTrue(app.buttons[track].exists, "missing audio track: \(track)")
+        }
+        snap(app, "13b-review-audio")
         // The review item is a long screen; the actions sit below the fold and
         // XCUITest never scrolls on its own.
         scrollTo(app, approve)

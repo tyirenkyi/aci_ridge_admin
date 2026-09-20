@@ -31,6 +31,11 @@ nonisolated protocol AdminAPI: Sendable {
     func addSkip(_ id: String, day: CalendarDay) async throws
     func removeSkip(_ id: String, day: CalendarDay) async throws
 
+    func translationStatus(lang: String) async throws -> TranslationStatusDTO
+    func translation(date: String, lang: String) async throws -> TranslationDetailDTO
+    func translationAudio(date: String, lang: String) async throws -> TranslationAudioDTO
+    func reviewTranslation(date: String, lang: String, _ patch: PatchBody) async throws -> TranslationPatchResultDTO
+
     func events() async throws -> [EventDTO]
     func createEvent(_ body: EventBody) async throws -> EventDTO
     func updateEvent(_ id: String, _ patch: PatchBody) async throws -> EventDTO

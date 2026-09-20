@@ -85,6 +85,31 @@ nonisolated extension APIClient {
     }
 }
 
+// MARK: - Translations
+
+nonisolated extension APIClient {
+    /// Every devotional date with this language's review state, the untranslated
+    /// days included — the domain mapping drops those.
+    func translationStatus(lang: String) async throws(APIError) -> TranslationStatusDTO {
+        try await send(Endpoint(.get, "/api/translations/status",
+                                query: [URLQueryItem(name: "lang", value: lang)]))
+    }
+
+    /// `date` is the path spelling, `DD-MM-YYYY`.
+    func translation(date: String, lang: String) async throws(APIError) -> TranslationDetailDTO {
+        try await send(Endpoint(.get, "/api/translations/\(date)/\(lang)"))
+    }
+
+    /// Signed URLs, good for an hour. Re-fetch rather than cache them.
+    func translationAudio(date: String, lang: String) async throws(APIError) -> TranslationAudioDTO {
+        try await send(Endpoint(.get, "/api/translations/\(date)/\(lang)/audio-urls"))
+    }
+
+    func reviewTranslation(date: String, lang: String, _ patch: PatchBody) async throws(APIError) -> TranslationPatchResultDTO {
+        try await send(Endpoint(.patch, "/api/translations/\(date)/\(lang)", body: patch))
+    }
+}
+
 // MARK: - Events
 
 nonisolated extension APIClient {

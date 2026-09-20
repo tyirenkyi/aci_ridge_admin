@@ -53,6 +53,19 @@ final class AdminStore {
                 }
             )
         }
+        // Reviews are seeded through the same wire → domain mapping the live path
+        // uses, details included: a spinner that is still turning stops the app
+        // reporting itself idle, and XCUITest waits on that before every tap.
+        let details = SampleData.translationDetails
+        let audio = SampleData.translationAudio
+        for lang in Language.all {
+            let rows = SampleData.translationStatus(lang.value).summaries
+            reviewQueues[lang.value] = .loaded(rows)
+            for row in rows {
+                guard let dto = details[row.id] else { continue }
+                reviewDetails[row.id] = .loaded(TranslationDetail(dto, audio: audio[row.id]))
+            }
+        }
         lastLoaded = Date()
     }
 
@@ -68,10 +81,16 @@ final class AdminStore {
     var recurring: [RecurringRule] { rulesState.value ?? [] }
     var events: [ChurchEvent] { eventsState.value ?? [] }
 
-    /// Sample-backed until the notification-translation API lands — the server only
-    /// translates devotionals today, so there is nothing to call for these rows.
-    /// See the separate plan.
-    var translations: [String: [TranslationItem]] = SampleData.translations
+    /// The review queue, keyed by language value. Each tab loads and fails on its
+    /// own, so a dead Spanish request never blanks the French one.
+    ///
+    /// Only devotionals appear here: the server translates the daily devotional and
+    /// nothing else, so notices and recurring rules have no review state to fetch.
+    private(set) var reviewQueues: [String: Loadable<[TranslationSummary]>] = [:]
+    /// One day's text and recordings, keyed by `TranslationSummary.ID`. Fetched
+    /// only when a day is opened — the queue is metadata, and the corpus is every
+    /// devotional the church has ever published.
+    private(set) var reviewDetails: [TranslationSummary.ID: Loadable<TranslationDetail>] = [:]
     var reviewLanguage: Language = .french
 
     private(set) var busy: Set<BusyKey> = []
@@ -116,8 +135,20 @@ final class AdminStore {
         return rows.sorted { $0.0 < $1.0 }.map(\.1)
     }
 
+    func reviewQueue(_ lang: Language) -> Loadable<[TranslationSummary]> {
+        reviewQueues[lang.value] ?? .idle
+    }
+
+    func reviewRows(_ lang: Language) -> [TranslationSummary] {
+        reviewQueue(lang).value ?? []
+    }
+
+    func reviewDetail(_ id: TranslationSummary.ID) -> Loadable<TranslationDetail> {
+        reviewDetails[id] ?? .idle
+    }
+
     func pendingCount(_ lang: Language) -> Int {
-        (translations[lang.value] ?? []).filter { $0.status == .pending }.count
+        reviewRows(lang).filter { $0.status == .pending }.count
     }
 
     var pendingTotal: Int { Language.all.reduce(0) { $0 + pendingCount($1) } }
@@ -126,8 +157,8 @@ final class AdminStore {
     func notice(_ id: Notice.ID) -> Notice? { notices.first { $0.id == id } }
     func event(_ id: ChurchEvent.ID) -> ChurchEvent? { events.first { $0.id == id } }
 
-    func translation(_ id: TranslationItem.ID) -> TranslationItem? {
-        translations.values.joined().first { $0.id == id }
+    func summary(_ id: TranslationSummary.ID) -> TranslationSummary? {
+        reviewQueues.values.compactMap(\.value).joined().first { $0.id == id }
     }
 
     // MARK: Loading
@@ -136,7 +167,9 @@ final class AdminStore {
         async let notices: Void = loadNotices(force: force)
         async let rules: Void = loadRules(force: force)
         async let events: Void = loadEvents(force: force)
-        _ = await (notices, rules, events)
+        // Both languages, because the tab badge counts them together.
+        async let reviews: Void = loadReviews(force: force)
+        _ = await (notices, rules, events, reviews)
         lastLoaded = Date()
     }
 
@@ -193,6 +226,81 @@ final class AdminStore {
         } catch {
             state.fail(error)
             occurrencesState[id] = state
+        }
+    }
+
+    // MARK: Review
+
+    func loadReviews(force: Bool = false) async {
+        await withTaskGroup(of: Void.self) { group in
+            for lang in Language.all {
+                group.addTask { await self.loadReview(lang, force: force) }
+            }
+        }
+    }
+
+    func loadReview(_ lang: Language, force: Bool = false) async {
+        var state = reviewQueue(lang)
+        guard force || !state.hasLoaded else { return }
+        state.beginRefresh()
+        reviewQueues[lang.value] = state
+        do {
+            let dto = try await perform { try await api.translationStatus(lang: lang.value) }
+            reviewQueues[lang.value] = .loaded(dto.summaries)
+        } catch {
+            state.fail(error)
+            reviewQueues[lang.value] = state
+        }
+    }
+
+    /// The text and the recordings for one day. They are two requests: the signed
+    /// URLs can fail on their own (storage, an expired key) without taking the text
+    /// with them, and a reviewer can still read a draft they can't listen to.
+    func loadReviewDetail(_ id: TranslationSummary.ID, force: Bool = false) async {
+        guard let summary = summary(id) else { return }
+        var state = reviewDetail(id)
+        guard force || !state.hasLoaded else { return }
+        state.beginRefresh()
+        reviewDetails[id] = state
+        do {
+            let detail = try await perform { [api] in
+                async let text = api.translation(date: summary.pathDate, lang: summary.lang)
+                async let audio = try? await api.translationAudio(date: summary.pathDate, lang: summary.lang)
+                return TranslationDetail(try await text, audio: await audio)
+            }
+            reviewDetails[id] = .loaded(detail)
+        } catch {
+            state.fail(error)
+            reviewDetails[id] = state
+        }
+    }
+
+    /// Approve or send back. A rejection carries the note the server insists on:
+    /// it refuses a rejection without one, so the translator always knows why.
+    func decide(_ id: TranslationSummary.ID, _ status: ReviewStatus, note: String = "") async throws(APIError) {
+        guard let summary = summary(id) else {
+            throw APIError.notFound("That day isn't in the review queue any more.")
+        }
+        var patch = PatchBody()
+        patch.set("status", status.wire)
+        if status == .rejected { patch.set("review_note", note.trimmed) }
+
+        let result = try await perform {
+            try await api.reviewTranslation(date: summary.pathDate, lang: summary.lang, patch)
+        }
+        apply(result.translation, to: id, lang: summary.lang)
+    }
+
+    private func apply(_ entry: TranslationEntryDTO, to id: TranslationSummary.ID, lang: String) {
+        if var rows = reviewQueues[lang]?.value,
+           let i = rows.firstIndex(where: { $0.id == id }) {
+            if let status = entry.status.flatMap(ReviewStatus.init(wire:)) { rows[i].status = status }
+            rows[i].note = entry.reviewNote
+            if let stale = entry.audioStale { rows[i].audioStale = stale }
+            reviewQueues[lang] = .loaded(rows)
+        }
+        if let detail = reviewDetails[id]?.value {
+            reviewDetails[id] = .loaded(detail.applying(entry))
         }
     }
 

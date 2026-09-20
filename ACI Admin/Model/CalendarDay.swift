@@ -44,6 +44,18 @@ nonisolated struct CalendarDay: Hashable, Comparable, Sendable {
         self.init(year: y, month: m, day: d)
     }
 
+    /// Parses the devotional table's own spelling, "20/09/2026". The audio and
+    /// translation routes are the only place this form reaches the app.
+    init?(devotional: String) {
+        let parts = devotional.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              parts[0].count == 2, parts[1].count == 2, parts[2].count == 4,
+              let d = Int(parts[0]), let m = Int(parts[1]), let y = Int(parts[2]),
+              (1...12).contains(m), (1...31).contains(d)
+        else { return nil }
+        self.init(year: y, month: m, day: d)
+    }
+
     init(_ date: Date, in cal: Calendar = .ghana) {
         let c = cal.dateComponents([.year, .month, .day], from: date)
         self.init(year: c.year ?? 1970, month: c.month ?? 1, day: c.day ?? 1)

@@ -17,6 +17,11 @@ actor StubAPI: AdminAPI {
     private var rules: [RuleDTO]
     private var events: [EventDTO]
     private var skips: [String: Set<String>] = [:]
+    /// Review state moves under the stub too, so approving in the click-through
+    /// actually changes the row behind it.
+    private var statusByLang: [String: TranslationStatusDTO]
+    private var detailByKey: [String: TranslationDetailDTO]
+    private let audioByKey: [String: TranslationAudioDTO]
 
     init() {
         notices = SampleData.notices.map(NoticeDTO.init(stubbing:))
@@ -25,6 +30,61 @@ actor StubAPI: AdminAPI {
         for rule in SampleData.recurring {
             skips[rule.id] = Set(rule.skips.map(\.iso))
         }
+        statusByLang = Dictionary(
+            uniqueKeysWithValues: Language.all.map { ($0.value, SampleData.translationStatus($0.value)) }
+        )
+        detailByKey = SampleData.translationDetails
+        audioByKey = SampleData.translationAudio
+    }
+
+    // MARK: Translations
+
+    func translationStatus(lang: String) async throws(APIError) -> TranslationStatusDTO {
+        statusByLang[lang] ?? TranslationStatusDTO(lang: lang, dates: [])
+    }
+
+    func translation(date: String, lang: String) async throws(APIError) -> TranslationDetailDTO {
+        guard let row = detailByKey[Self.key(date, lang)] else {
+            throw APIError.notFound("No \(lang) translation for \(date)")
+        }
+        return row
+    }
+
+    func translationAudio(date: String, lang: String) async throws(APIError) -> TranslationAudioDTO {
+        guard let row = audioByKey[Self.key(date, lang)] else {
+            throw APIError.notFound("No \(lang) audio for \(date)")
+        }
+        return row
+    }
+
+    func reviewTranslation(date: String, lang: String, _ patch: PatchBody) async throws(APIError) -> TranslationPatchResultDTO {
+        let key = Self.key(date, lang)
+        guard let existing = detailByKey[key] else {
+            throw APIError.notFound("No \(lang) translation for \(date)")
+        }
+        let status = patch.string("status") ?? existing.translation.status
+        let note = patch.string("review_note")
+        let entry = existing.translation.deciding(status: status, note: status == "rejected" ? note : nil)
+        detailByKey[key] = TranslationDetailDTO(
+            id: existing.id, date: existing.date, lang: lang,
+            translation: entry, source: existing.source
+        )
+        if var bag = statusByLang[lang] {
+            let rows = bag.dates.map { row -> TranslationStatusDTO.Row in
+                guard row.date == existing.date else { return row }
+                return TranslationStatusDTO.Row(id: row.id, date: row.date, status: status ?? row.status,
+                                                audioStale: row.audioStale, needsReview: row.needsReview,
+                                                reviewNote: entry.reviewNote)
+            }
+            bag = TranslationStatusDTO(lang: lang, dates: rows)
+            statusByLang[lang] = bag
+        }
+        return TranslationPatchResultDTO(id: existing.id, date: existing.date, lang: lang, translation: entry)
+    }
+
+    /// The stub is keyed by the stored spelling; the routes use the dashed one.
+    private static func key(_ pathDate: String, _ lang: String) -> String {
+        "\(lang)|\(pathDate.replacingOccurrences(of: "-", with: "/"))"
     }
 
     // MARK: Identity
@@ -295,6 +355,19 @@ private nonisolated extension EventDTO {
             startsAt: event.startsAt, endsAt: event.endsAt, timeLabel: event.timeLabel,
             location: event.location, tone: event.tone.rawValue, status: event.status.rawValue,
             createdAt: Date(), updatedAt: Date()
+        )
+    }
+}
+
+
+private nonisolated extension TranslationEntryDTO {
+    func deciding(status: String?, note: String?) -> TranslationEntryDTO {
+        TranslationEntryDTO(
+            status: status ?? self.status, audioStale: audioStale, title: title, verse: verse,
+            scripture: scripture, declarations: declarations, prayers: prayers,
+            paragraphs: paragraphs, needsReview: needsReview, translatedAt: translatedAt,
+            voice: voice, ttsModel: ttsModel, reviewNote: note,
+            reviewedBy: "franklin@acirid.ge", reviewedAt: APIDate.string(Date())
         )
     }
 }

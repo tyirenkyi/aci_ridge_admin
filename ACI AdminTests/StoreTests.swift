@@ -39,6 +39,19 @@ private actor FailingAPI: AdminAPI {
     func addSkip(_ id: String, day: CalendarDay) async throws { throw error }
     func removeSkip(_ id: String, day: CalendarDay) async throws { throw error }
 
+    func translationStatus(lang: String) async throws -> TranslationStatusDTO {
+        try await base.translationStatus(lang: lang)
+    }
+    func translation(date: String, lang: String) async throws -> TranslationDetailDTO {
+        try await base.translation(date: date, lang: lang)
+    }
+    func translationAudio(date: String, lang: String) async throws -> TranslationAudioDTO {
+        try await base.translationAudio(date: date, lang: lang)
+    }
+    func reviewTranslation(date: String, lang: String, _ patch: PatchBody) async throws -> TranslationPatchResultDTO {
+        throw error
+    }
+
     func events() async throws -> [EventDTO] { try await base.events() }
     func createEvent(_ body: EventBody) async throws -> EventDTO { throw error }
     func updateEvent(_ id: String, _ patch: PatchBody) async throws -> EventDTO { throw error }
@@ -167,5 +180,121 @@ struct AdminStoreTests {
         let sent = try! #require(store.notices.first { $0.status == .sent })
         #expect(sent.isEditable == false)
         #expect(sent.opensLabel == "412 opened")
+    }
+}
+
+
+@Suite("Translation review")
+@MainActor
+struct TranslationReviewTests {
+
+    private func loadedStore() async -> AdminStore {
+        let store = AdminStore(api: StubAPI())
+        await store.loadReviews()
+        return store
+    }
+
+    @Test func queueDropsDaysThatWereNeverTranslated() async {
+        let store = await loadedStore()
+        let rows = store.reviewRows(.french)
+        // The fixture has five dates, one of them "none".
+        #expect(rows.count == 4)
+        #expect(!rows.contains { $0.date == SampleData.devotionalDate(-4) })
+    }
+
+    @Test func queueRunsNewestFirst() async {
+        let store = await loadedStore()
+        let days = store.reviewRows(.french).compactMap(\.day)
+        #expect(days == days.sorted(by: >))
+    }
+
+    @Test func pendingCountsOnlyUndecidedDays() async {
+        let store = await loadedStore()
+        #expect(store.pendingCount(.french) == 2)
+        #expect(store.pendingCount(.spanish) == 1)
+        #expect(store.pendingTotal == 3)
+    }
+
+    @Test func detailPairsEveryPartWithItsEnglish() async {
+        let store = await loadedStore()
+        let id = "fr|" + SampleData.devotionalDate(0)
+        await store.loadReviewDetail(id)
+        let detail = store.reviewDetail(id).value
+        let labels = detail?.fields.map(\.label) ?? []
+        #expect(labels.prefix(4) == ["Title", "Verse", "Scripture", "Declarations"])
+        #expect(labels.filter { $0.hasPrefix("Prayer") }.count == 5)
+        #expect(labels.filter { $0.hasPrefix("Paragraph") }.count == 3)
+        // Both sides present on every field the fixture fills in.
+        #expect(detail?.fields.allSatisfy { !$0.source.isEmpty && !$0.draft.isEmpty } == true)
+    }
+
+    @Test func aDayIsSeveralRecordings() async {
+        let store = await loadedStore()
+        let id = "fr|" + SampleData.devotionalDate(0)
+        await store.loadReviewDetail(id)
+        let tracks = store.reviewDetail(id).value?.tracks ?? []
+        // Narration, declarations, five prayers, and the shared bed.
+        #expect(tracks.map(\.key) == ["main", "declaration", "prayer_1", "prayer_2",
+                                      "prayer_3", "prayer_4", "prayer_5", "background"])
+        // Every voiced part has an English twin to A/B against.
+        #expect(tracks.filter { $0.key != "background" }.allSatisfy { $0.hasTranslation && $0.hasSource })
+        // The music bed is language-neutral: one file, no translation.
+        #expect(tracks.last?.hasTranslation == false)
+        #expect(tracks.last?.hasSource == true)
+    }
+
+    @Test func prayersOrderNumericallyNotAlphabetically() {
+        let dto = TranslationAudioDTO(
+            id: "d", date: "20/09/2026", lang: "fr", expiresIn: 3600,
+            urls: [
+                "prayer_1": "https://x/1.mp3",
+                "prayer_2": "https://x/2.mp3",
+                "prayer_10": "https://x/10.mp3",
+            ]
+        )
+        #expect(dto.tracks.map(\.key) == ["prayer_1", "prayer_2", "prayer_10"])
+    }
+
+    @Test func aPartWithNoRecordingIsLeftOut() {
+        let dto = TranslationAudioDTO(
+            id: "d", date: "20/09/2026", lang: "fr", expiresIn: 3600,
+            urls: ["main": "https://x/main.mp3"]
+        )
+        #expect(dto.tracks.map(\.key) == ["main"])
+        #expect(dto.tracks.first?.hasSource == false)
+    }
+
+    @Test func approvingMovesTheRowAndTheDetail() async throws {
+        let store = await loadedStore()
+        let id = "fr|" + SampleData.devotionalDate(0)
+        await store.loadReviewDetail(id)
+        try await store.decide(id, .approved)
+        #expect(store.summary(id)?.status == .approved)
+        #expect(store.reviewDetail(id).value?.status == .approved)
+        #expect(store.pendingCount(.french) == 1)
+    }
+
+    @Test func rejectingKeepsTheNoteOnTheRow() async throws {
+        let store = await loadedStore()
+        let id = "fr|" + SampleData.devotionalDate(0)
+        try await store.decide(id, .rejected, note: "  Use le tombeau.  ")
+        #expect(store.summary(id)?.status == .rejected)
+        #expect(store.summary(id)?.note == "Use le tombeau.")
+    }
+
+    @Test func aFailedDecisionLeavesTheRowAlone() async {
+        let store = AdminStore(api: FailingAPI(error: .server("nope")))
+        await store.loadReviews()
+        let id = "fr|" + SampleData.devotionalDate(0)
+        await #expect(throws: APIError.self) {
+            try await store.decide(id, .approved)
+        }
+        #expect(store.summary(id)?.status == .pending)
+    }
+
+    @Test func devotionalDatesParseBackToDays() {
+        #expect(CalendarDay(devotional: "20/09/2026") == CalendarDay(year: 2026, month: 9, day: 20))
+        #expect(CalendarDay(devotional: "2026-09-20") == nil)
+        #expect(CalendarDay(devotional: "5/9/2026") == nil)
     }
 }

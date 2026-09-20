@@ -16,7 +16,7 @@ enum AdminRoute: Hashable {
     case composeRule(RecurringRule?)
     case schedule(RecurringRule.ID)
     case composeEvent(ChurchEvent?)
-    case review(TranslationItem.ID)
+    case review(TranslationSummary.ID)
 }
 
 // MARK: - Root
